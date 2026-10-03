@@ -4,10 +4,9 @@ from fastmcp import Client
 from fastmcp.exceptions import ToolError
 
 from pantry_mcp.grocy import Grocy
-from pantry_mcp.pantry import Pantry
 from pantry_mcp.server import build_server
 
-TOOLS = {
+READ_TOOLS = {
     "stock", "stock_alerts", "product", "recipes", "recipe", "meal_plan", "shopping_list",
     "query_objects", "system_info",
 }
@@ -18,16 +17,17 @@ async def text(client: Client, tool: str, args: dict | None = None) -> str:
 
 
 @pytest.mark.anyio
-async def test_tools_are_read_only(pantry: Pantry) -> None:
-    async with Client(build_server(pantry)) as client:
+async def test_only_read_tools_are_read_only(grocy: Grocy) -> None:
+    async with Client(build_server(grocy)) as client:
         tools = await client.list_tools()
-        assert {t.name for t in tools} == TOOLS
-        assert all(t.annotations.read_only_hint for t in tools)
+        read_only = {t.name for t in tools if t.annotations.read_only_hint}
+        assert read_only == READ_TOOLS
+        assert len(tools) > len(READ_TOOLS)
 
 
 @pytest.mark.anyio
-async def test_stock(pantry: Pantry) -> None:
-    async with Client(build_server(pantry)) as client:
+async def test_stock(grocy: Grocy) -> None:
+    async with Client(build_server(grocy)) as client:
         lines = (await text(client, "stock")).splitlines()
     assert lines == [
         "- Pâtes (id 1): 1000 grammes, 250 grammes opened, due 2026-12-01, Placard",
@@ -37,8 +37,8 @@ async def test_stock(pantry: Pantry) -> None:
 
 
 @pytest.mark.anyio
-async def test_stock_alerts(pantry: Pantry) -> None:
-    async with Client(build_server(pantry)) as client:
+async def test_stock_alerts(grocy: Grocy) -> None:
+    async with Client(build_server(grocy)) as client:
         alerts = await text(client, "stock_alerts")
     assert alerts == (
         "## Due within 5 days\n- Œufs: 6 pièces, due 2026-10-08\n\n"
@@ -47,8 +47,8 @@ async def test_stock_alerts(pantry: Pantry) -> None:
 
 
 @pytest.mark.anyio
-async def test_product(pantry: Pantry) -> None:
-    async with Client(build_server(pantry)) as client:
+async def test_product(grocy: Grocy) -> None:
+    async with Client(build_server(grocy)) as client:
         details = await text(client, "product", {"name_or_id": "pâtes"})
         assert details.splitlines()[:4] == [
             "# Pâtes (id 1)",
@@ -62,13 +62,13 @@ async def test_product(pantry: Pantry) -> None:
 
         with pytest.raises(ToolError, match=r"Several products match 'e': .*Pâtes \(id 1\)"):
             await client.call_tool("product", {"name_or_id": "e"})
-        with pytest.raises(ToolError, match="No product matches 'riz'"):
+        with pytest.raises(ToolError, match="No product named 'riz'"):
             await client.call_tool("product", {"name_or_id": "riz"})
 
 
 @pytest.mark.anyio
-async def test_recipes(pantry: Pantry) -> None:
-    async with Client(build_server(pantry)) as client:
+async def test_recipes(grocy: Grocy) -> None:
+    async with Client(build_server(grocy)) as client:
         listing = await text(client, "recipes")
         assert listing.splitlines() == [
             "- Omelette (id 1, 1 servings): can be made with the current stock",
@@ -89,13 +89,13 @@ async def test_recipes(pantry: Pantry) -> None:
         assert "### Service\n- Pâtes: à volonté — in stock" in sauce
 
         # Meal plan shadow recipes are not real recipes
-        with pytest.raises(ToolError, match="No recipe matches"):
+        with pytest.raises(ToolError, match="No recipe named"):
             await client.call_tool("recipe", {"name_or_id": "-1"})
 
 
 @pytest.mark.anyio
-async def test_meal_plan(pantry: Pantry) -> None:
-    async with Client(build_server(pantry)) as client:
+async def test_meal_plan(grocy: Grocy) -> None:
+    async with Client(build_server(grocy)) as client:
         plan = await text(client, "meal_plan", {"start": "2026-10-05", "end": "2026-10-11"})
         assert plan == (
             "## 2026-10-05 (Monday)\n"
@@ -111,16 +111,16 @@ async def test_meal_plan(pantry: Pantry) -> None:
 
 
 @pytest.mark.anyio
-async def test_shopping_list(pantry: Pantry) -> None:
-    async with Client(build_server(pantry)) as client:
+async def test_shopping_list(grocy: Grocy) -> None:
+    async with Client(build_server(grocy)) as client:
         assert await text(client, "shopping_list") == (
             "- Tomates pelées: 1 boîte\n- Papier cuisson (done)"
         )
 
 
 @pytest.mark.anyio
-async def test_query_objects(pantry: Pantry) -> None:
-    async with Client(build_server(pantry)) as client:
+async def test_query_objects(grocy: Grocy) -> None:
+    async with Client(build_server(grocy)) as client:
         rows = await text(client, "query_objects", {"entity": "locations", "filters": ["name~frig"]})
         assert rows == '[{"id":2,"name":"Frigo"}]'
 
@@ -132,28 +132,28 @@ async def test_query_objects(pantry: Pantry) -> None:
 
 @pytest.mark.anyio
 async def test_grocy_errors_are_reported() -> None:
-    wrong_key = Pantry(Grocy("http://grocy.test", "wrong", transport=httpx.MockTransport(
+    wrong_key = Grocy("http://grocy.test", "wrong", transport=httpx.MockTransport(
         lambda request: httpx.Response(401, json={"error_message": "Unauthorized"})
-    )))
+    ))
 
     def refuse(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("Connection refused")
 
-    down = Pantry(Grocy("http://grocy.test", "key", transport=httpx.MockTransport(refuse)))
-    for pantry, message in ((wrong_key, "Grocy error 401: Unauthorized"),
+    down = Grocy("http://grocy.test", "key", transport=httpx.MockTransport(refuse))
+    for broken, message in ((wrong_key, "Grocy error 401: Unauthorized"),
                             (down, "Grocy is unreachable")):
-        async with Client(build_server(pantry)) as client:
+        async with Client(build_server(broken)) as client:
             with pytest.raises(ToolError, match=message):
                 await client.call_tool("stock", {})
 
 
 @pytest.mark.anyio
-async def test_other_account_is_denied(pantry: Pantry) -> None:
+async def test_other_account_is_denied(grocy: Grocy) -> None:
     for user in ("player42", None):
-        server = build_server(pantry, allowed_user="assistant", current_user=lambda: user)
+        server = build_server(grocy, allowed_user="assistant", current_user=lambda: user)
         async with Client(server) as client:
             with pytest.raises(ToolError, match="Access denied"):
                 await client.call_tool("stock", {})
-    server = build_server(pantry, allowed_user="assistant", current_user=lambda: "assistant")
+    server = build_server(grocy, allowed_user="assistant", current_user=lambda: "assistant")
     async with Client(server) as client:
         assert await text(client, "stock")

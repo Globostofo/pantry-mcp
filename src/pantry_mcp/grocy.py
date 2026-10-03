@@ -24,14 +24,28 @@ class Grocy:
             transport=transport,
         )
 
-    async def get(self, path: str, params: dict[str, Any] | None = None) -> Any:
+    async def request(
+        self, method: str, path: str, params: dict[str, Any] | None = None, body: Any = None
+    ) -> Any:
         try:
-            response = await self._http.get(path, params=params)
+            response = await self._http.request(method, path, params=params, json=body)
         except httpx.HTTPError as e:
             raise GrocyError(f"Grocy is unreachable: {e}") from e
         if response.is_error:
             raise GrocyError(f"Grocy error {response.status_code}: {error_message(response)}")
-        return response.json()
+        return response.json() if response.content else None
+
+    async def get(self, path: str, params: dict[str, Any] | None = None) -> Any:
+        return await self.request("GET", path, params)
+
+    async def post(self, path: str, body: Any = None) -> Any:
+        return await self.request("POST", path, body=body if body is not None else {})
+
+    async def put(self, path: str, body: Any) -> Any:
+        return await self.request("PUT", path, body=body)
+
+    async def delete(self, path: str) -> Any:
+        return await self.request("DELETE", path)
 
     async def objects(
         self,

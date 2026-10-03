@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import copy
+import json
 import operator
+import re
+from typing import Any
 
 import httpx
 import pytest
 
 from pantry_mcp.grocy import Grocy
-from pantry_mcp.pantry import NEVER_DUE, Pantry
+from pantry_mcp.pantry import NEVER_DUE
 
 API_KEY = "test-key"
 
@@ -76,6 +80,9 @@ OBJECTS = {
     "products": PRODUCTS,
     "locations": LOCATIONS,
     "quantity_unit_conversions_resolved": CONVERSIONS,
+    "quantity_unit_conversions": CONVERSIONS,
+    "recipes_pos": [],
+    "product_groups": [],
     "recipes": RECIPES,
     "recipes_pos_resolved": RECIPES_POS_RESOLVED,
     "meal_plan": MEAL_PLAN,
@@ -113,57 +120,137 @@ def error(status: int, message: str) -> httpx.Response:
     return httpx.Response(status, json={"error_message": message})
 
 
-def handler(request: httpx.Request) -> httpx.Response:
-    if request.headers.get("GROCY-API-KEY") != API_KEY:
-        return error(401, "Unauthorized")
-    path = request.url.path.removeprefix("/api")
-    if path.startswith("/objects/"):
-        rows = OBJECTS.get(path.removeprefix("/objects/"))
+class FakeGrocy:
+    """In-memory Grocy: each test gets its own copy of the tables and stock."""
+
+    def __init__(self) -> None:
+        self.tables = copy.deepcopy(OBJECTS)
+        self.stock = {row["product_id"]: copy.deepcopy(row) for row in STOCK}
+        self.transactions: dict[str, tuple[int, float]] = {}
+        self.calls: list[tuple[str, str, Any]] = []
+        # POST paths that fail, to exercise rollbacks
+        self.failing: set[str] = set()
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        if request.headers.get("GROCY-API-KEY") != API_KEY:
+            return error(401, "Unauthorized")
+        path = request.url.path.removeprefix("/api")
+        body = json.loads(request.content) if request.content else None
+        self.calls.append((request.method, path, body))
+        if request.method == "POST" and path in self.failing:
+            return error(400, f"Simulated failure on {path}")
+        if path.startswith("/objects/"):
+            return self.objects(request, path.removeprefix("/objects/"), body)
+        if request.method == "GET":
+            return self.get(request, path)
+        return self.post(path, body)
+
+    def objects(self, request: httpx.Request, path: str, body: Any) -> httpx.Response:
+        entity, _, object_id = path.partition("/")
+        rows = self.tables.get(entity)
         if rows is None:
             return error(400, "Entity does not exist or is not exposed")
-        for condition in request.url.params.get_list("query[]"):
-            rows = [r for r in rows if matches(r, condition)]
-        if "limit" in request.url.params:
-            rows = rows[: int(request.url.params["limit"])]
-        return httpx.Response(200, json=rows)
-    if path == "/stock":
-        return httpx.Response(200, json=STOCK)
-    if path == "/stock/volatile":
-        assert request.url.params["due_soon_days"] == "5"
-        return httpx.Response(200, json={
-            "due_products": [STOCK[1]],
-            "overdue_products": [],
-            "expired_products": [],
-            "missing_products": [
-                {"id": 1, "name": "Pâtes", "amount_missing": 200, "is_partly_in_stock": 1}
-            ],
+        if request.method == "GET":
+            for condition in request.url.params.get_list("query[]"):
+                rows = [r for r in rows if matches(r, condition)]
+            if "limit" in request.url.params:
+                rows = rows[: int(request.url.params["limit"])]
+            return httpx.Response(200, json=rows)
+        if request.method == "POST":
+            if entity == "products" and any(r["name"] == body["name"] for r in rows):
+                return error(400, "UNIQUE constraint failed: products.name")
+            new_id = max((int(r["id"]) for r in rows), default=0) + 1
+            rows.append({"id": new_id, **body})
+            return httpx.Response(200, json={"created_object_id": new_id})
+        row = next((r for r in rows if r["id"] == int(object_id)), None)
+        if row is None:
+            return error(400, "Object not found")
+        if request.method == "PUT":
+            row.update(body)
+        else:
+            rows.remove(row)
+        return httpx.Response(204)
+
+    def product_stock(self, product_id: int) -> dict:
+        product = next(p for p in self.tables["products"] if p["id"] == product_id)
+        return self.stock.setdefault(product_id, {
+            "product_id": product_id, "amount": 0, "amount_opened": 0,
+            "best_before_date": NEVER_DUE, "product": product,
         })
-    if path == "/stock/products/1":
-        return httpx.Response(200, json={
-            "product": PRODUCTS[0], "stock_amount": 1000, "stock_amount_opened": 250,
-            "next_due_date": "2026-12-01", "location": LOCATIONS[0],
-            "last_purchased": "2026-09-28", "last_used": None, "last_price": 0.0021,
-            "avg_price": None,
-        })
-    if path == "/stock/products/1/locations":
-        return httpx.Response(200, json=[
-            {"product_id": 1, "location_id": 1, "location_name": "Placard", "amount": 1000}
-        ])
-    if path == "/recipes/fulfillment":
-        return httpx.Response(200, json=[
-            {"recipe_id": 1, "need_fulfilled": 1, "need_fulfilled_with_shopping_list": 1,
-             "missing_products_count": 0},
-            {"recipe_id": 2, "need_fulfilled": 0, "need_fulfilled_with_shopping_list": 1,
-             "missing_products_count": 1},
-        ])
-    if path == "/system/info":
-        return httpx.Response(200, json={"grocy_version": {"Version": "4.7.1"}})
-    return error(404, f"No route for {path}")
+
+    def get(self, request: httpx.Request, path: str) -> httpx.Response:
+        if path == "/stock":
+            return httpx.Response(200, json=[r for r in self.stock.values() if r["amount"] > 0])
+        if path == "/stock/volatile":
+            assert request.url.params["due_soon_days"] == "5"
+            return httpx.Response(200, json={
+                "due_products": [self.stock[2]],
+                "overdue_products": [],
+                "expired_products": [],
+                "missing_products": [
+                    {"id": 1, "name": "Pâtes", "amount_missing": 200, "is_partly_in_stock": 1}
+                ],
+            })
+        if match := re.fullmatch(r"/stock/products/(\d+)", path):
+            row = self.product_stock(int(match[1]))
+            return httpx.Response(200, json={
+                "product": row["product"], "stock_amount": row["amount"],
+                "stock_amount_opened": row["amount_opened"],
+                "next_due_date": row["best_before_date"], "location": LOCATIONS[0],
+                "last_purchased": "2026-09-28", "last_used": None, "last_price": 0.0021,
+                "avg_price": None,
+            })
+        if path == "/stock/products/1/locations":
+            return httpx.Response(200, json=[
+                {"product_id": 1, "location_id": 1, "location_name": "Placard", "amount": 1000}
+            ])
+        if path == "/recipes/fulfillment":
+            return httpx.Response(200, json=[
+                {"recipe_id": 1, "need_fulfilled": 1, "need_fulfilled_with_shopping_list": 1,
+                 "missing_products_count": 0},
+                {"recipe_id": 2, "need_fulfilled": 0, "need_fulfilled_with_shopping_list": 1,
+                 "missing_products_count": 1},
+            ])
+        if path == "/system/info":
+            return httpx.Response(200, json={"grocy_version": {"Version": "4.7.1"}})
+        return error(404, f"No route for {path}")
+
+    def post(self, path: str, body: Any) -> httpx.Response:
+        if match := re.fullmatch(r"/stock/products/(\d+)/(add|consume)", path):
+            row = self.product_stock(int(match[1]))
+            delta = body["amount"] if match[2] == "add" else -body["amount"]
+            if row["amount"] + delta < 0:
+                return error(400, "Amount to be consumed cannot be > current stock amount")
+            row["amount"] += delta
+            transaction_id = f"tx{len(self.transactions) + 1}"
+            self.transactions[transaction_id] = (row["product_id"], delta)
+            return httpx.Response(200, json=[{"id": 1, "transaction_id": transaction_id}])
+        if match := re.fullmatch(r"/stock/transactions/([^/]+)/undo", path):
+            if match[1] not in self.transactions:
+                return error(400, "This transaction was not found or already undone")
+            product_id, delta = self.transactions.pop(match[1])
+            self.stock[product_id]["amount"] -= delta
+            return httpx.Response(204)
+        if path == "/stock/shoppinglist/add-product":
+            self.tables["shopping_list"].append({
+                "id": 99, "shopping_list_id": body["list_id"], "product_id": body["product_id"],
+                "amount": body["product_amount"], "qu_id": body["qu_id"],
+                "note": body.get("note"), "done": 0,
+            })
+            return httpx.Response(204)
+        if re.fullmatch(r"/recipes/\d+/consume", path):
+            return httpx.Response(204)
+        return error(404, f"No route for {path}")
 
 
 @pytest.fixture
-def pantry() -> Pantry:
-    return Pantry(Grocy("http://grocy.test", API_KEY, transport=httpx.MockTransport(handler)))
+def fake() -> FakeGrocy:
+    return FakeGrocy()
+
+
+@pytest.fixture
+def grocy(fake: FakeGrocy) -> Grocy:
+    return Grocy("http://grocy.test", API_KEY, transport=httpx.MockTransport(fake.handler))
 
 
 @pytest.fixture

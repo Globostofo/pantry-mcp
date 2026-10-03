@@ -1,9 +1,4 @@
-"""Read operations on Grocy, rendered as compact text for the MCP client.
-
-Grocy stores every amount (stock, recipe ingredients, shopping list, meal plan) in the
-product's stock quantity unit; a `qu_id` next to an amount is only the unit to display it
-in, converted with `quantity_unit_conversions_resolved`, as Grocy's own UI does.
-"""
+"""Read operations on Grocy, rendered as compact text for the MCP client."""
 
 from __future__ import annotations
 
@@ -11,11 +6,11 @@ import html
 import json
 import re
 from collections import defaultdict
-from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Any
 
 from pantry_mcp.grocy import Grocy, GrocyError
+from pantry_mcp.lookup import by_id, find, load_units
 
 NEVER_DUE = "2999-12-31"
 QUERY_LIMIT_MAX = 200
@@ -29,15 +24,6 @@ READABLE_ENTITIES = frozenset({
     "products_average_price", "quantity_unit_conversions_resolved", "recipes_pos_resolved",
     "battery_charge_cycles", "product_barcodes_view", "uihelper_shopping_list",
 })
-
-
-def num(value: Any) -> str:
-    f = float(value)
-    return str(int(f)) if f.is_integer() else f"{f:.3f}".rstrip("0").rstrip(".")
-
-
-def by_id(rows: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
-    return {int(r["id"]): r for r in rows}
 
 
 def plain_text(markup: str | None) -> str:
@@ -55,75 +41,15 @@ def parse_day(value: str) -> date:
         raise GrocyError(f"Invalid date {value!r}, expected YYYY-MM-DD") from e
 
 
-@dataclass
-class Units:
-    """Quantity units and per-product conversions, loaded once per tool call."""
-
-    units: dict[int, dict[str, Any]]
-    products: dict[int, dict[str, Any]]
-    factors: dict[tuple[int, int, int], float]
-
-    def name(self, qu_id: Any, amount: Any) -> str:
-        unit = self.units.get(int(qu_id)) if qu_id else None
-        if unit is None:
-            return ""
-        if float(amount) == 1:
-            return unit["name"]
-        return unit.get("name_plural") or unit["name"]
-
-    def qty(self, product_id: Any, stock_amount: Any, qu_id: Any = None) -> str:
-        """Render an amount stored in the product's stock unit, in `qu_id` when convertible."""
-        product = self.products.get(int(product_id)) if product_id else None
-        amount = float(stock_amount)
-        if product is None:
-            return num(amount)
-        stock_qu = int(product["qu_id_stock"])
-        target = int(qu_id) if qu_id else stock_qu
-        factor = self.factors.get((int(product_id), stock_qu, target))
-        if target != stock_qu and factor is not None:
-            amount, unit = amount * factor, target
-        else:
-            unit = stock_qu
-        return f"{num(amount)} {self.name(unit, amount)}".strip()
-
-
 class Pantry:
     def __init__(self, grocy: Grocy) -> None:
         self.grocy = grocy
-
-    async def load_units(self) -> Units:
-        units = await self.grocy.objects("quantity_units")
-        products = await self.grocy.objects("products")
-        conversions = await self.grocy.objects("quantity_unit_conversions_resolved")
-        factors = {
-            (int(c["product_id"]), int(c["from_qu_id"]), int(c["to_qu_id"])): float(c["factor"])
-            for c in conversions
-            if c.get("product_id")
-        }
-        return Units(by_id(units), by_id(products), factors)
-
-    async def find(self, entity: str, name_or_id: str, extra: tuple[str, ...] = ()) -> dict:
-        """One object by id or by name: exact name first, then substring match."""
-        key = name_or_id.strip()
-        if key.isdigit():
-            rows = await self.grocy.objects(entity, (f"id={key}", *extra))
-        else:
-            rows = await self.grocy.objects(entity, (f"name~{key}", *extra))
-            exact = [r for r in rows if r["name"].casefold() == key.casefold()]
-            rows = exact or rows
-        label = entity.removesuffix("s")
-        if not rows:
-            raise GrocyError(f"No {label} matches {name_or_id!r}")
-        if len(rows) > 1:
-            names = ", ".join(f"{r['name']} (id {r['id']})" for r in rows[:20])
-            raise GrocyError(f"Several {label}s match {name_or_id!r}: {names}")
-        return rows[0]
 
     async def stock(self) -> str:
         rows = await self.grocy.get("/stock")
         if not rows:
             return "The stock is empty"
-        units = await self.load_units()
+        units = await load_units(self.grocy)
         locations = by_id(await self.grocy.objects("locations"))
         lines = []
         for row in sorted(rows, key=lambda r: r["product"]["name"].casefold()):
@@ -141,7 +67,7 @@ class Pantry:
 
     async def stock_alerts(self, due_soon_days: int = 5) -> str:
         data = await self.grocy.get("/stock/volatile", {"due_soon_days": due_soon_days})
-        units = await self.load_units()
+        units = await load_units(self.grocy)
         sections = []
         for key, title in (
             ("expired_products", "Expired (expiration date passed, should be thrown away)"),
@@ -167,10 +93,10 @@ class Pantry:
         return "\n\n".join(sections) or "Nothing expired, due soon or below minimum stock"
 
     async def product(self, name_or_id: str) -> str:
-        product = await self.find("products", name_or_id)
+        product = await find(self.grocy, "products", name_or_id)
         details = await self.grocy.get(f"/stock/products/{product['id']}")
         per_location = await self.grocy.get(f"/stock/products/{product['id']}/locations")
-        units = await self.load_units()
+        units = await load_units(self.grocy)
         pid = product["id"]
         lines = [f"# {product['name']} (id {pid})"]
         description = plain_text(product.get("description"))
@@ -220,9 +146,9 @@ class Pantry:
         return "\n".join(lines)
 
     async def recipe(self, name_or_id: str) -> str:
-        recipe = await self.find("recipes", name_or_id, ("type=normal",))
+        recipe = await find(self.grocy, "recipes", name_or_id, ("type=normal",))
         positions = await self.grocy.objects("recipes_pos_resolved", (f"recipe_id={recipe['id']}",))
-        units = await self.load_units()
+        units = await load_units(self.grocy)
         lines = [
             f"# {recipe['name']} (id {recipe['id']})",
             f"Amounts for {recipe['desired_servings']} servings "
@@ -266,7 +192,7 @@ class Pantry:
             return f"Nothing planned from {first} to {last}"
         recipes = by_id(await self.grocy.objects("recipes"))
         sections = by_id(await self.grocy.objects("meal_plan_sections"))
-        units = await self.load_units()
+        units = await load_units(self.grocy)
         days: dict[str, list[tuple[int, str]]] = defaultdict(list)
         for row in rows:
             if row["type"] == "recipe":
@@ -297,7 +223,7 @@ class Pantry:
         if not items:
             return "The shopping list is empty"
         lists = by_id(await self.grocy.objects("shopping_lists"))
-        units = await self.load_units()
+        units = await load_units(self.grocy)
         grouped: dict[int, list[str]] = defaultdict(list)
         for item in items:
             product = units.products.get(int(item.get("product_id") or 0))

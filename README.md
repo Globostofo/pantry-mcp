@@ -2,7 +2,12 @@
 
 Remote MCP server exposing Grocy (the [pantry](https://github.com/Globostofo/pantry) service: food stock, recipes, meal plan, shopping list) to claude.ai (web, desktop, mobile) as a custom connector.
 
-- Read-only for now. Tools: `stock`, `stock_alerts`, `product`, `recipes`, `recipe`, `meal_plan`, `shopping_list`, `query_objects` (raw rows of any Grocy entity except API keys and sessions), `system_info`.
+- Read tools: `stock`, `stock_alerts`, `product`, `recipes`, `recipe`, `meal_plan`, `shopping_list`, `query_objects` (raw rows of any Grocy entity except API keys and sessions), `system_info`.
+- Write tools, taking names and units instead of ids (amounts are converted to the product's stock unit, the unit Grocy stores them in; writes only accept exact names):
+  - master data: `create_product`, `create_recipe`;
+  - stock: `add_to_stock`, `consume`, `open_product`, `transfer`, `inventory`, `undo` (reverts a stock change by its transaction id);
+  - recipes, shopping list, meal plan: `cook_recipe`, `add_recipe_missing_to_shopping_list`, `shopping_list_add`, `shopping_list_remove`, `shopping_list_add_missing`, `shopping_list_clear`, `plan_meal`;
+  - generic, for the rest of the API: `create_object`, `update_object`, `delete_object` (any editable Grocy entity except API keys).
 - Talks to Grocy through the `heracles` Docker network (`http://pantry`), with a Grocy API key dedicated to this server. Grocy itself stays off the internet.
 - Auth: the server is its own OAuth authorization server for claude.ai (dynamic client registration, same domain as the MCP endpoint) and delegates the actual login to the SSO (`auth.globostofo.net`) through a pre-registered OIDC client. It uses the SSO account, group and login flow shared by all of Romain's assistant connectors (`assistant`, see the heracles-brain README), plus a username check in the server.
 - Publicly exposed on `pantry-mcp.globostofo.net`: an exception to the VPN-only rule, since claude.ai's servers are the ones calling the connector. A dedicated hostname (not `pantry.globostofo.net/mcp`) leaves `pantry.globostofo.net` free for Grocy's web UI.
@@ -65,12 +70,14 @@ docker compose logs -f pantry-mcp
 
 OAuth state (registered clients, tokens) lives in the `oauth` volume, encrypted with `JWT_SIGNING_KEY`.
 
-Update:
+Update (back up Grocy first when the update changes write tools, see the pantry README):
 
 ```bash
 git pull
 docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
 ```
+
+In claude.ai, tools marked destructive (`consume`, `inventory`, `undo`, `cook_recipe`, `shopping_list_remove`, `shopping_list_clear`, `update_object`, `delete_object`) can be set to ask for approval in the connector settings.
 
 ## Check
 
@@ -111,7 +118,7 @@ python3 -m venv .venv
 .venv/bin/pytest
 ```
 
-Tests run against a fake Grocy (`httpx.MockTransport`): no network access.
+Tests run against an in-memory fake Grocy (`httpx.MockTransport`): no network access.
 
 Run locally without auth, against the real Grocy (on the LAN or through the VPN; refused when `BASE_URL` is https):
 
