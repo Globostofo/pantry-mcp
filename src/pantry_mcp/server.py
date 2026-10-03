@@ -27,6 +27,10 @@ maintain the data for him.
 - Prefer the dedicated tools; use `query_objects` only for data they do not cover.
 
 Writing:
+- Before writing, if the Brain connector is available, read the note `grocy-conventions`
+  (`read_note("grocy-conventions")`): Romain's own conventions for his Grocy (naming,
+  units, locations, shelf lives, recipes) take precedence over the defaults below. When
+  he states a new convention, add it to that note.
 - Writes take exact names (or ids), never partial matches: look objects up first, and
   reuse existing products, units and locations instead of creating near-duplicates.
 - A product's stock unit can never change once it has been in stock: pick the unit it is
