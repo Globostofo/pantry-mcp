@@ -165,10 +165,9 @@ async def test_rules_are_in_tool_descriptions(grocy: Grocy) -> None:
     async with Client(build_server(grocy)) as client:
         tools = {t.name: t for t in await client.list_tools()}
     for name, t in tools.items():
+        assert "Before using any Pantry tool" in t.description, name
         if name in READ_TOOLS:
             assert "answer Romain in French" in t.description
-        elif name != "undo":
-            assert "`grocy-conventions`" in t.description, name
     assert "exact name" in tools["create_recipe"].description
     assert "converted to the stock unit" in tools["add_to_stock"].description
     assert "`undo` reverts" in tools["consume"].description

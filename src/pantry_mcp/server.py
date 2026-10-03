@@ -49,9 +49,9 @@ UPSTREAM_SCOPES = "openid profile email offline_access"
 # every rule a tool depends on is repeated in its description.
 READS = "Names are in French: answer Romain in French."
 CONVENTIONS = (
-    "Before the first write of a conversation, read Romain's Grocy conventions, the brain "
-    'note `grocy-conventions` (Brain connector: `read_note("grocy-conventions")`), and '
-    "follow them. When he states a new convention, add it to that note."
+    "Before using any Pantry tool in a conversation, read Romain's Grocy conventions, the "
+    'brain note `grocy-conventions` (Brain connector: `read_note("grocy-conventions")`), '
+    "and follow them. When he states a new convention, add it to that note."
 )
 EXACT_NAMES = (
     "Products, units, locations, recipes, lists and sections are matched by exact name "
@@ -134,47 +134,47 @@ def build_server(
         except GrocyError as e:
             raise ToolError(str(e)) from e
 
-    @tool(READS, annotations=READ_ONLY)
+    @tool(CONVENTIONS, READS, annotations=READ_ONLY)
     async def stock() -> str:
         """Current stock: every product in stock with amount, opened amount, next due date
         and location."""
         return await call(pantry.stock)
 
-    @tool(READS, annotations=READ_ONLY)
+    @tool(CONVENTIONS, READS, annotations=READ_ONLY)
     async def stock_alerts(due_soon_days: int = 5) -> str:
         """Products that are expired, overdue, due within `due_soon_days` days, or below
         their minimum stock amount. Overdue: best before date passed, usually still edible.
         Expired: expiration date passed, should be thrown away."""
         return await call(pantry.stock_alerts, due_soon_days)
 
-    @tool(READS, annotations=READ_ONLY)
+    @tool(CONVENTIONS, READS, annotations=READ_ONLY)
     async def product(name_or_id: str) -> str:
         """Details of one product, by id or name (exact or partial): stock per location,
         due date, minimum stock, last purchase and prices."""
         return await call(pantry.product, name_or_id)
 
-    @tool(READS, annotations=READ_ONLY)
+    @tool(CONVENTIONS, READS, annotations=READ_ONLY)
     async def recipes() -> str:
         """All recipes, each with whether it can be made with the current stock."""
         return await call(pantry.recipes)
 
-    @tool(READS, annotations=READ_ONLY)
+    @tool(CONVENTIONS, READS, annotations=READ_ONLY)
     async def recipe(name_or_id: str) -> str:
         """One recipe, by id or name: ingredients with stock status, and instructions."""
         return await call(pantry.recipe, name_or_id)
 
-    @tool(READS, annotations=READ_ONLY)
+    @tool(CONVENTIONS, READS, annotations=READ_ONLY)
     async def meal_plan(start: str = "", end: str = "") -> str:
         """Meal plan between two dates (YYYY-MM-DD, inclusive). Defaults: from today,
         for 7 days."""
         return await call(pantry.meal_plan, start, end)
 
-    @tool(READS, annotations=READ_ONLY)
+    @tool(CONVENTIONS, READS, annotations=READ_ONLY)
     async def shopping_list() -> str:
         """Items on the shopping list(s)."""
         return await call(pantry.shopping_list)
 
-    @tool(READS, annotations=READ_ONLY)
+    @tool(CONVENTIONS, READS, annotations=READ_ONLY)
     async def query_objects(
         entity: str, filters: list[str] | None = None, order: str = "", limit: int = 50
     ) -> str:
@@ -184,7 +184,7 @@ def build_server(
         e.g. ["name~pâtes"]. `order` is "<field>" or "<field>:desc". At most 200 rows."""
         return await call(pantry.query_objects, entity, filters, order, limit)
 
-    @tool(READS, annotations=READ_ONLY)
+    @tool(CONVENTIONS, READS, annotations=READ_ONLY)
     async def system_info() -> str:
         """Grocy version and server information."""
         return await call(pantry.system_info)
@@ -273,7 +273,7 @@ def build_server(
         `best_before_date` and `location` apply to an added amount."""
         return await call(actions.inventory, product, new_amount, unit, best_before_date, location)
 
-    @tool(annotations=DESTRUCTIVE)
+    @tool(CONVENTIONS, annotations=DESTRUCTIVE)
     async def undo(transaction_id: str) -> str:
         """Revert a stock change by the transaction id it returned."""
         return await call(actions.undo, transaction_id)
