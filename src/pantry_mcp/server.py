@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import os
 import sys
 from urllib.parse import urlparse
@@ -44,6 +45,28 @@ Writing:
 """
 
 UPSTREAM_SCOPES = "openid profile email offline_access"
+# claude.ai does not show the server instructions to the model, only tool descriptions:
+# every rule a tool depends on is repeated in its description.
+READS = "Names are in French: answer Romain in French."
+CONVENTIONS = (
+    "Before the first write of a conversation, read Romain's Grocy conventions, the brain "
+    'note `grocy-conventions` (Brain connector: `read_note("grocy-conventions")`), and '
+    "follow them. When he states a new convention, add it to that note."
+)
+EXACT_NAMES = (
+    "Products, units, locations, recipes, lists and sections are matched by exact name "
+    "(ignoring case) or id, never partially: look them up first, and reuse existing ones "
+    "instead of creating near-duplicates."
+)
+AMOUNTS = (
+    "`amount` is expressed in `unit` (default: the product's stock unit) and converted to "
+    "the stock unit, the unit Grocy stores amounts in."
+)
+UNDO = "Returns a transaction id: give it to Romain, `undo` reverts the change."
+RAW = (
+    "Raw Grocy fields, as returned by `query_objects`; amounts are in the product's stock "
+    "unit. Prefer the dedicated tools when one fits."
+)
 READ_ONLY = {"readOnlyHint": True}
 ADDITIVE = {"readOnlyHint": False, "destructiveHint": False}
 DESTRUCTIVE = {"readOnlyHint": False, "destructiveHint": True}
@@ -94,6 +117,15 @@ def build_server(
     pantry = Pantry(grocy)
     actions = Actions(grocy)
 
+    def tool(*notes: str, annotations: dict):
+        """Register a tool whose description is its docstring followed by `notes`."""
+
+        def register(fn):
+            description = "\n\n".join([inspect.getdoc(fn), *notes])
+            return mcp.tool(annotations=annotations, description=description)(fn)
+
+        return register
+
     async def call(fn, *args):
         if allowed_user is not None and current_user() != allowed_user:
             raise ToolError("Access denied: this account is not allowed to use the pantry")
@@ -102,46 +134,47 @@ def build_server(
         except GrocyError as e:
             raise ToolError(str(e)) from e
 
-    @mcp.tool(annotations=READ_ONLY)
+    @tool(READS, annotations=READ_ONLY)
     async def stock() -> str:
         """Current stock: every product in stock with amount, opened amount, next due date
         and location."""
         return await call(pantry.stock)
 
-    @mcp.tool(annotations=READ_ONLY)
+    @tool(READS, annotations=READ_ONLY)
     async def stock_alerts(due_soon_days: int = 5) -> str:
         """Products that are expired, overdue, due within `due_soon_days` days, or below
-        their minimum stock amount."""
+        their minimum stock amount. Overdue: best before date passed, usually still edible.
+        Expired: expiration date passed, should be thrown away."""
         return await call(pantry.stock_alerts, due_soon_days)
 
-    @mcp.tool(annotations=READ_ONLY)
+    @tool(READS, annotations=READ_ONLY)
     async def product(name_or_id: str) -> str:
         """Details of one product, by id or name (exact or partial): stock per location,
         due date, minimum stock, last purchase and prices."""
         return await call(pantry.product, name_or_id)
 
-    @mcp.tool(annotations=READ_ONLY)
+    @tool(READS, annotations=READ_ONLY)
     async def recipes() -> str:
         """All recipes, each with whether it can be made with the current stock."""
         return await call(pantry.recipes)
 
-    @mcp.tool(annotations=READ_ONLY)
+    @tool(READS, annotations=READ_ONLY)
     async def recipe(name_or_id: str) -> str:
         """One recipe, by id or name: ingredients with stock status, and instructions."""
         return await call(pantry.recipe, name_or_id)
 
-    @mcp.tool(annotations=READ_ONLY)
+    @tool(READS, annotations=READ_ONLY)
     async def meal_plan(start: str = "", end: str = "") -> str:
         """Meal plan between two dates (YYYY-MM-DD, inclusive). Defaults: from today,
         for 7 days."""
         return await call(pantry.meal_plan, start, end)
 
-    @mcp.tool(annotations=READ_ONLY)
+    @tool(READS, annotations=READ_ONLY)
     async def shopping_list() -> str:
         """Items on the shopping list(s)."""
         return await call(pantry.shopping_list)
 
-    @mcp.tool(annotations=READ_ONLY)
+    @tool(READS, annotations=READ_ONLY)
     async def query_objects(
         entity: str, filters: list[str] | None = None, order: str = "", limit: int = 50
     ) -> str:
@@ -151,14 +184,14 @@ def build_server(
         e.g. ["name~pâtes"]. `order` is "<field>" or "<field>:desc". At most 200 rows."""
         return await call(pantry.query_objects, entity, filters, order, limit)
 
-    @mcp.tool(annotations=READ_ONLY)
+    @tool(READS, annotations=READ_ONLY)
     async def system_info() -> str:
         """Grocy version and server information."""
         return await call(pantry.system_info)
 
     # Master data
 
-    @mcp.tool(annotations=ADDITIVE)
+    @tool(CONVENTIONS, EXACT_NAMES, annotations=ADDITIVE)
     async def create_product(
         name: str,
         stock_unit: str,
@@ -182,7 +215,7 @@ def build_server(
             default_best_before_days_after_open, product_group, description,
         )
 
-    @mcp.tool(annotations=ADDITIVE)
+    @tool(CONVENTIONS, EXACT_NAMES, AMOUNTS, annotations=ADDITIVE)
     async def create_recipe(
         name: str, servings: int, ingredients: list[Ingredient], instructions: str = ""
     ) -> str:
@@ -192,7 +225,7 @@ def build_server(
 
     # Stock
 
-    @mcp.tool(annotations=ADDITIVE)
+    @tool(CONVENTIONS, EXACT_NAMES, AMOUNTS, UNDO, annotations=ADDITIVE)
     async def add_to_stock(
         product: str,
         amount: float,
@@ -208,7 +241,7 @@ def build_server(
             actions.add_to_stock, product, amount, unit, best_before_date, location, total_price
         )
 
-    @mcp.tool(annotations=DESTRUCTIVE)
+    @tool(CONVENTIONS, EXACT_NAMES, AMOUNTS, UNDO, annotations=DESTRUCTIVE)
     async def consume(
         product: str, amount: float, unit: str | None = None, spoiled: bool = False,
         location: str = "",
@@ -217,13 +250,13 @@ def build_server(
         `spoiled`. Opened and soonest-due units are used first."""
         return await call(actions.consume, product, amount, unit, spoiled, location)
 
-    @mcp.tool(annotations=ADDITIVE)
+    @tool(CONVENTIONS, EXACT_NAMES, AMOUNTS, UNDO, annotations=ADDITIVE)
     async def open_product(product: str, amount: float = 1, unit: str | None = None) -> str:
         """Mark an amount of a product as opened (its due date then follows the product's
         shelf life after opening)."""
         return await call(actions.open_product, product, amount, unit)
 
-    @mcp.tool(annotations=ADDITIVE)
+    @tool(CONVENTIONS, EXACT_NAMES, AMOUNTS, UNDO, annotations=ADDITIVE)
     async def transfer(
         product: str, amount: float, from_location: str, to_location: str,
         unit: str | None = None,
@@ -231,7 +264,7 @@ def build_server(
         """Move an amount of a product from one location to another."""
         return await call(actions.transfer, product, amount, from_location, to_location, unit)
 
-    @mcp.tool(annotations=DESTRUCTIVE)
+    @tool(CONVENTIONS, EXACT_NAMES, AMOUNTS, UNDO, annotations=DESTRUCTIVE)
     async def inventory(
         product: str, new_amount: float, unit: str | None = None, best_before_date: str = "",
         location: str = "",
@@ -240,25 +273,25 @@ def build_server(
         `best_before_date` and `location` apply to an added amount."""
         return await call(actions.inventory, product, new_amount, unit, best_before_date, location)
 
-    @mcp.tool(annotations=DESTRUCTIVE)
+    @tool(annotations=DESTRUCTIVE)
     async def undo(transaction_id: str) -> str:
         """Revert a stock change by the transaction id it returned."""
         return await call(actions.undo, transaction_id)
 
     # Recipes, shopping list, meal plan
 
-    @mcp.tool(annotations=DESTRUCTIVE)
+    @tool(CONVENTIONS, EXACT_NAMES, annotations=DESTRUCTIVE)
     async def cook_recipe(recipe: str, servings: int | None = None) -> str:
         """Consume the in-stock ingredients of a recipe (for `servings`, which also becomes
         the recipe's desired servings). Cannot be undone as a whole."""
         return await call(actions.cook_recipe, recipe, servings)
 
-    @mcp.tool(annotations=ADDITIVE)
+    @tool(CONVENTIONS, EXACT_NAMES, annotations=ADDITIVE)
     async def add_recipe_missing_to_shopping_list(recipe: str) -> str:
         """Put the ingredients missing for a recipe on the shopping list."""
         return await call(actions.add_recipe_missing_to_shopping_list, recipe)
 
-    @mcp.tool(annotations=ADDITIVE)
+    @tool(CONVENTIONS, EXACT_NAMES, AMOUNTS, annotations=ADDITIVE)
     async def shopping_list_add(
         product: str = "", amount: float = 1, unit: str | None = None, note: str = "",
         shopping_list: str = "",
@@ -267,25 +300,25 @@ def build_server(
         `shopping_list` defaults to the main list."""
         return await call(actions.shopping_list_add, product, amount, unit, note, shopping_list)
 
-    @mcp.tool(annotations=DESTRUCTIVE)
+    @tool(CONVENTIONS, EXACT_NAMES, AMOUNTS, annotations=DESTRUCTIVE)
     async def shopping_list_remove(
         product: str, amount: float, unit: str | None = None, shopping_list: str = "",
     ) -> str:
         """Remove an amount of a product from the shopping list."""
         return await call(actions.shopping_list_remove, product, amount, unit, shopping_list)
 
-    @mcp.tool(annotations=ADDITIVE)
+    @tool(CONVENTIONS, EXACT_NAMES, annotations=ADDITIVE)
     async def shopping_list_add_missing(shopping_list: str = "") -> str:
         """Put every product below its minimum stock amount on the shopping list."""
         return await call(actions.shopping_list_add_missing, shopping_list)
 
-    @mcp.tool(annotations=DESTRUCTIVE)
+    @tool(CONVENTIONS, EXACT_NAMES, annotations=DESTRUCTIVE)
     async def shopping_list_clear(done_only: bool = True, shopping_list: str = "") -> str:
         """Remove the done items from the shopping list, or every item if `done_only` is
         false."""
         return await call(actions.shopping_list_clear, done_only, shopping_list)
 
-    @mcp.tool(annotations=ADDITIVE)
+    @tool(CONVENTIONS, EXACT_NAMES, AMOUNTS, annotations=ADDITIVE)
     async def plan_meal(
         day: str, recipe: str = "", product: str = "", amount: float = 1,
         unit: str | None = None, note: str = "", servings: int = 1, section: str = "",
@@ -299,20 +332,19 @@ def build_server(
 
     # Generic: any other write of the Grocy API
 
-    @mcp.tool(annotations=ADDITIVE)
+    @tool(CONVENTIONS, RAW, annotations=ADDITIVE)
     async def create_object(entity: str, data: dict) -> str:
         """Create a raw Grocy object (e.g. locations, quantity_units,
         quantity_unit_conversions, product_groups, shopping_lists, meal_plan_sections,
-        chores, tasks). Fields as returned by `query_objects`; amounts in stock units."""
+        chores, tasks)."""
         return await call(actions.create_object, entity, data)
 
-    @mcp.tool(annotations=DESTRUCTIVE)
+    @tool(CONVENTIONS, RAW, annotations=DESTRUCTIVE)
     async def update_object(entity: str, object_id: int, data: dict) -> str:
-        """Change fields of a raw Grocy object (only the given fields). Amounts in stock
-        units."""
+        """Change fields of a raw Grocy object (only the given fields are changed)."""
         return await call(actions.update_object, entity, object_id, data)
 
-    @mcp.tool(annotations=DESTRUCTIVE)
+    @tool(CONVENTIONS, RAW, annotations=DESTRUCTIVE)
     async def delete_object(entity: str, object_id: int) -> str:
         """Delete a raw Grocy object. Deleting a product also deletes its stock history,
         conversions, recipe ingredients, meal plan and shopping list entries."""

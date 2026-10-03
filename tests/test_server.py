@@ -157,3 +157,19 @@ async def test_other_account_is_denied(grocy: Grocy) -> None:
     server = build_server(grocy, allowed_user="assistant", current_user=lambda: "assistant")
     async with Client(server) as client:
         assert await text(client, "stock")
+
+
+@pytest.mark.anyio
+async def test_rules_are_in_tool_descriptions(grocy: Grocy) -> None:
+    """claude.ai ignores the server instructions: each tool carries the rules it needs."""
+    async with Client(build_server(grocy)) as client:
+        tools = {t.name: t for t in await client.list_tools()}
+    for name, t in tools.items():
+        if name in READ_TOOLS:
+            assert "answer Romain in French" in t.description
+        elif name != "undo":
+            assert "`grocy-conventions`" in t.description, name
+    assert "exact name" in tools["create_recipe"].description
+    assert "converted to the stock unit" in tools["add_to_stock"].description
+    assert "`undo` reverts" in tools["consume"].description
+    assert "Raw Grocy fields" in tools["delete_object"].description
