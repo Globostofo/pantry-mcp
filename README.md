@@ -48,8 +48,8 @@ Remote MCP server exposing Grocy (the [pantry](https://github.com/Globostofo/pan
 **[prod — RPi]**
 
 ```bash
-git clone git@github.com:Globostofo/pantry-mcp.git ~/pantry-mcp
-cd ~/pantry-mcp
+git clone git@github.com:Globostofo/pantry-mcp.git ~/deployment/pantry-mcp
+cd ~/deployment/pantry-mcp
 cp .env.example .env
 
 # JWT_SIGNING_KEY
