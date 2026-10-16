@@ -161,14 +161,25 @@ async def test_other_account_is_denied(grocy: Grocy) -> None:
 
 @pytest.mark.anyio
 async def test_rules_are_in_tool_descriptions(grocy: Grocy) -> None:
-    """claude.ai ignores the server instructions: each tool carries the rules it needs."""
+    """Some clients ignore the server instructions: each tool carries the rules it needs."""
     async with Client(build_server(grocy)) as client:
         tools = {t.name: t for t in await client.list_tools()}
-    for name, t in tools.items():
-        assert "Before using any Pantry tool" in t.description, name
-        if name in READ_TOOLS:
-            assert "answer Romain in French" in t.description
+    for name in READ_TOOLS:
+        assert "answer in the user's language" in tools[name].description, name
     assert "exact name" in tools["create_recipe"].description
     assert "converted to the stock unit" in tools["add_to_stock"].description
     assert "`undo` reverts" in tools["consume"].description
     assert "Raw Grocy fields" in tools["delete_object"].description
+
+
+@pytest.mark.anyio
+async def test_extra_instructions(grocy: Grocy) -> None:
+    extra = "Read the household conventions before writing."
+    server = build_server(grocy, extra_instructions=f"  {extra}\n")
+    async with Client(server) as client:
+        tools = await client.list_tools()
+    assert server.instructions.rstrip().endswith(extra)
+    for t in tools:
+        assert t.description.endswith(extra), t.name
+    async with Client(build_server(grocy)) as client:
+        assert all("conventions" not in t.description for t in await client.list_tools())

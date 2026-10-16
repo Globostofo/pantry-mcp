@@ -1,116 +1,161 @@
 # pantry-mcp
 
-Remote MCP server exposing Grocy (the [pantry](https://github.com/Globostofo/pantry) service: food stock, recipes, meal plan, shopping list) to claude.ai (web, desktop, mobile) as a custom connector.
+A remote [MCP](https://modelcontextprotocol.io) server that lets an AI agent read and maintain a
+[Grocy](https://grocy.info) instance: food stock, products, recipes, meal plan and shopping list.
 
-- Read tools: `stock`, `stock_alerts`, `product`, `recipes`, `recipe`, `meal_plan`, `shopping_list`, `query_objects` (raw rows of any Grocy entity except API keys and sessions), `system_info`.
-- Write tools, taking names and units instead of ids (amounts are converted to the product's stock unit, the unit Grocy stores them in; writes only accept exact names):
+The goal is to never open Grocy's UI again. Groceries, meals and leftovers are described to the
+agent in plain language, and it keeps Grocy up to date through the tools below.
+
+## What it looks like
+
+| Request | What the agent does |
+|---------|---------------------|
+| "I just bought 6 eggs and two cans of tomatoes" | `add_to_stock` twice (cans converted to grams, the product's stock unit), reports the transaction ids |
+| "What can I cook tonight?" | `recipes`: which recipes the current stock covers |
+| "Add what's missing for the omelette to the list" | `add_recipe_missing_to_shopping_list` |
+| "Oops, I only bought 4 eggs" | `undo` with the transaction id, then `add_to_stock` again |
+| "What expires this week?" | `stock_alerts` |
+
+## Tools
+
+- **Read**: `stock`, `stock_alerts`, `product`, `recipes`, `recipe`, `meal_plan`, `shopping_list`,
+  `query_objects` (raw rows of any Grocy entity except API keys and sessions), `system_info`.
+- **Write**, taking names and units instead of ids:
   - master data: `create_product`, `create_recipe`;
-  - stock: `add_to_stock`, `consume`, `open_product`, `transfer`, `inventory`, `undo` (reverts a stock change by its transaction id);
-  - recipes, shopping list, meal plan: `cook_recipe`, `add_recipe_missing_to_shopping_list`, `shopping_list_add`, `shopping_list_remove`, `shopping_list_add_missing`, `shopping_list_clear`, `plan_meal`;
-  - generic, for the rest of the API: `create_object`, `update_object`, `delete_object` (any editable Grocy entity except API keys).
-- Talks to Grocy through the `heracles` Docker network (`http://pantry`), with a Grocy API key dedicated to this server. Grocy itself stays off the internet.
-- Auth: the server is its own OAuth authorization server for claude.ai (dynamic client registration, same domain as the MCP endpoint) and delegates the actual login to the SSO (`auth.globostofo.net`) through a pre-registered OIDC client. It uses the SSO account, group and login flow shared by all of Romain's assistant connectors (`assistant`, see the heracles-brain README), plus a username check in the server.
-- Publicly exposed on `pantry-mcp.globostofo.net`: an exception to the VPN-only rule, since claude.ai's servers are the ones calling the connector. A dedicated hostname (not `pantry.globostofo.net/mcp`) leaves `pantry.globostofo.net` free for Grocy's web UI.
+  - stock: `add_to_stock`, `consume`, `open_product`, `transfer`, `inventory`, `undo`;
+  - recipes, shopping list, meal plan: `cook_recipe`, `add_recipe_missing_to_shopping_list`,
+    `shopping_list_add`, `shopping_list_remove`, `shopping_list_add_missing`,
+    `shopping_list_clear`, `plan_meal`;
+  - generic, for the rest of the API: `create_object`, `update_object`, `delete_object`.
 
-## Prerequisites
+Every tool carries MCP annotations (read-only, additive or destructive), so clients can ask for
+confirmation before destructive calls.
 
-- Docker + Docker Compose
-- `heracles` Docker network (created by heracles-proxy)
-- heracles-proxy and heracles-auth running
-- pantry running and attached to the `heracles` network (see its README)
-- The `assistant` account, group and `assistant-authentication` flow in the SSO (heracles-brain README, "Isolated access in the SSO")
+## Architecture
 
-## Setup
-
-### 1. Grocy API key
-
-**[dev — browser, on the LAN or through the VPN]** In Grocy (`http://192.168.1.123:9283`): user menu → Manage API keys → Add, description `pantry-mcp`. Keep the key for `.env`.
-
-### 2. SSO provider and application
-
-**[dev — browser, via VPN]** In the admin panel (`http://192.168.1.123:9000/if/admin/`):
-
-1. **Signing key**: System → Certificates → Generate: common name `pantry-mcp-signing`, validity `3650` days, private key algorithm **RSA** (the server verifies RS256 by default).
-2. **Provider**: Applications → Providers → Create → OAuth2/OpenID Provider
-   - Name: `pantry-mcp`
-   - Authentication flow: **`assistant-authentication`**
-   - Authorization flow: `default-provider-authorization-explicit-consent`
-   - Client type: **Confidential**
-   - Redirect URIs: Strict, `https://pantry-mcp.globostofo.net/auth/callback`
-   - Signing key: **`pantry-mcp-signing`**; Encryption key: empty
-   - Scopes (Advanced protocol settings): `openid`, `email`, `profile` **and `offline_access`** (without it no refresh token is issued, and claude.ai is logged out after 5 minutes)
-   - Refresh token validity: `days=90`
-   - Note the Client ID and Client Secret.
-3. **Application**: Applications → Applications → Create, name `pantry-mcp`, slug **`pantry-mcp`** (part of `OIDC_CONFIG_URL`), provider `pantry-mcp`. Then Policy / Group / User Bindings → Bind existing → Group → **`assistant`**. Without a binding, the application would be open to every SSO user.
-
-### 3. Environment
-
-**[prod — RPi]**
-
-```bash
-git clone git@github.com:Globostofo/pantry-mcp.git ~/deployment/pantry-mcp
-cd ~/deployment/pantry-mcp
-cp .env.example .env
-
-# JWT_SIGNING_KEY
-openssl rand -base64 36
-
-# Fill in OIDC_CLIENT_ID, OIDC_CLIENT_SECRET, JWT_SIGNING_KEY and GROCY_API_KEY
-nano .env
+```mermaid
+flowchart LR
+    client["MCP client<br>(AI agent)"] -- "OAuth 2.1 + MCP<br>(streamable HTTP)" --> server
+    subgraph server["pantry-mcp"]
+        oauth["OAuth server<br>(proxy to OIDC)"]
+        tools["MCP tools"]
+    end
+    oauth -- "OIDC login" --> idp["Identity provider"]
+    tools -- "REST API + API key<br>(private network)" --> grocy["Grocy"]
 ```
 
-## Deploy
+- The server is its own OAuth authorization server for MCP clients (dynamic client registration,
+  same origin as the MCP endpoint, as the MCP spec requires) and delegates the actual login to any
+  OpenID Connect provider. Only one account (`ALLOWED_USERNAME`) may use the tools.
+- Grocy is only reached over a private network with a dedicated API key: it never needs to be
+  exposed to the internet.
 
-**[prod — RPi]**
+Code layout (`src/pantry_mcp/`):
 
-```bash
-docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
-docker compose logs -f pantry-mcp
-```
+| Module | Role |
+|--------|------|
+| `grocy.py` | Minimal async client for the Grocy REST API |
+| `lookup.py` | Name resolution and quantity unit conversions, shared by reads and writes |
+| `pantry.py` | Read operations, rendered as compact text for the model |
+| `actions.py` | Write operations |
+| `server.py` | MCP tools, their descriptions and annotations, auth and configuration |
 
-OAuth state (registered clients, tokens) lives in the `oauth` volume, encrypted with `JWT_SIGNING_KEY`.
+## Design notes
 
-Update (back up Grocy first when the update changes write tools, see the pantry README):
+- **Exact names for writes.** Reads accept a unique partial name; writes only accept an exact name
+  (ignoring case) or an id, so that "milk" never silently targets "coconut milk". Names are
+  compared in Python, because SQLite's `LIKE` only ignores case for ASCII letters ("Œufs" vs
+  "œufs").
+- **Amounts in any unit.** Grocy stores every amount in the product's stock unit; the unit next to
+  an amount is only for display. Tools accept an amount in any unit the product has a conversion
+  for, convert it to the stock unit, and render results the way Grocy's own UI does.
+- **The stock unit is chosen once.** Grocy forbids changing it after the product has been in
+  stock, so `create_product` asks for it explicitly, with optional purchase unit and factor.
+- **No silent "due today".** `add_to_stock` refuses a product without a default shelf life unless
+  a best before date is given: Grocy would otherwise use today's date and flag it as due at once.
+- **No half-written recipes.** `create_recipe` resolves every ingredient before writing anything,
+  and deletes what it created if Grocy fails midway (Grocy does not cascade recipe deletions to
+  ingredients).
+- **Undo.** Stock changes return Grocy's transaction id, which `undo` reverts.
+- **Rules live in the tool descriptions.** Some MCP clients pass tool descriptions to the model
+  but not the server instructions, so every rule a tool depends on (exact names, units, undo) is
+  repeated in its description. Deployment-specific conventions (`PANTRY_INSTRUCTIONS`) are
+  appended the same way.
+- **Credentials stay out of reach.** `query_objects` and the generic write tools refuse Grocy's
+  API keys and sessions.
 
-```bash
-git pull
-docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
-```
+## Configuration
 
-In claude.ai, tools marked destructive (`consume`, `inventory`, `undo`, `cook_recipe`, `shopping_list_remove`, `shopping_list_clear`, `update_object`, `delete_object`) can be set to ask for approval in the connector settings.
+Environment variables (see `.env.example`):
 
-## Check
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `BASE_URL` | yes | Public HTTPS URL of the server; the MCP endpoint is `$BASE_URL/mcp` |
+| `GROCY_URL` | yes | Grocy base URL, as reached from the server |
+| `GROCY_API_KEY` | yes | Grocy API key dedicated to this server |
+| `OIDC_CONFIG_URL` | yes | OpenID configuration URL of the identity provider |
+| `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET` | yes | OIDC client registered for this server |
+| `ALLOWED_USERNAME` | yes | The only account allowed (`preferred_username` claim) |
+| `JWT_SIGNING_KEY` | yes | Signs issued tokens and encrypts the OAuth state (`openssl rand -base64 36`) |
+| `ALLOWED_REDIRECT_URIS` | no | Comma-separated redirect URI patterns MCP clients may register; empty: any client |
+| `PANTRY_INSTRUCTIONS` | no | Your own conventions (language, naming, units…), appended to the instructions and to every tool description |
+| `TZ` | no | Time zone used for "today" (default meal plan range) |
+| `PORT` | no | Listening port (default `8000`) |
 
-**[prod — RPi]** Grocy is reachable from the container (must print the Grocy version):
+## Deployment
 
-```bash
-docker compose exec pantry-mcp python -c "import os, httpx; print(httpx.get('http://pantry/api/system/info', headers={'GROCY-API-KEY': os.environ['GROCY_API_KEY']}).json())"
-```
+Prerequisites: Docker with Compose, a Grocy instance reachable from the container, an HTTPS
+reverse proxy, and an OpenID Connect provider.
 
-**[dev]**
+1. **Grocy API key**: in Grocy, user menu → Manage API keys → Add.
+2. **OIDC client** at your identity provider:
+   - confidential client, redirect URI `<BASE_URL>/auth/callback`;
+   - scopes `openid`, `profile`, `email` and `offline_access` (without it no refresh token is
+     issued, and clients are logged out when the access token expires);
+   - an RS256 signing key;
+   - access restricted to the account that will use the server, ideally with a second factor.
+3. **Environment**:
 
-```bash
-# Both must point to https://pantry-mcp.globostofo.net (not to the SSO domain)
-curl -s https://pantry-mcp.globostofo.net/.well-known/oauth-protected-resource/mcp
-curl -s https://pantry-mcp.globostofo.net/.well-known/oauth-authorization-server
+   ```bash
+   cp .env.example .env
+   openssl rand -base64 36   # JWT_SIGNING_KEY
+   nano .env
+   ```
 
-# Must return 401
-curl -s -o /dev/null -w "%{http_code}\n" -X POST https://pantry-mcp.globostofo.net/mcp
-```
+4. **Run**:
 
-## Add the connector in claude.ai
+   ```bash
+   docker compose up -d --build
+   docker compose logs -f pantry-mcp
+   ```
 
-**[claude.ai — browser]** Settings → Connectors → Add custom connector:
+   The container listens on `127.0.0.1:8000`; point the reverse proxy for `BASE_URL` at it. If
+   Grocy runs in another Compose project, attach both to a shared Docker network (in a
+   `docker-compose.override.yml`, which is git-ignored) and use its service name in `GROCY_URL`.
+   OAuth state (registered clients, tokens) lives in the `oauth` volume.
 
-- Name: `Pantry`
-- URL: `https://pantry-mcp.globostofo.net/mcp`
-- Leave the advanced OAuth settings empty (the server supports dynamic client registration)
+5. **Check**:
 
-Then Connect, log in with the `assistant` account (password + second factor) and approve. If the browser already has an SSO session with another account, log out of `auth.globostofo.net` first, or connect from a private window.
+   ```bash
+   # Grocy is reachable from the container (prints the Grocy version)
+   docker compose exec pantry-mcp python -c "import os, httpx; print(httpx.get(os.environ['GROCY_URL'] + '/api/system/info', headers={'GROCY-API-KEY': os.environ['GROCY_API_KEY']}).json())"
+
+   # Both must point to BASE_URL, not to the identity provider
+   curl -s "$BASE_URL/.well-known/oauth-protected-resource/mcp"
+   curl -s "$BASE_URL/.well-known/oauth-authorization-server"
+
+   # Must return 401
+   curl -s -o /dev/null -w "%{http_code}\n" -X POST "$BASE_URL/mcp"
+   ```
+
+6. **Connect a client**: add a remote MCP server with URL `<BASE_URL>/mcp` and no client
+   credentials (the server supports dynamic client registration), then log in with the allowed
+   account.
+
+Update: `git pull && docker compose up -d --build`. Back up Grocy first when an update changes
+write tools.
 
 ## Development
-
-**[dev]**
 
 ```bash
 python3 -m venv .venv
@@ -118,13 +163,19 @@ python3 -m venv .venv
 .venv/bin/pytest
 ```
 
-Tests run against an in-memory fake Grocy (`httpx.MockTransport`): no network access.
+Tests run against an in-memory fake Grocy with state (`httpx.MockTransport`), with no network
+access: writes are checked against the resulting rows, including the rollback paths.
 
-Run locally without auth, against the real Grocy (on the LAN or through the VPN; refused when `BASE_URL` is https):
+Run locally without auth against a real Grocy (refused when `BASE_URL` is HTTPS), then explore the
+tools with the MCP Inspector:
 
 ```bash
 PANTRY_NO_AUTH=1 BASE_URL=http://localhost:8000 \
-  GROCY_URL=http://192.168.1.123:9283 GROCY_API_KEY=<key> .venv/bin/pantry-mcp
+  GROCY_URL=<grocy-url> GROCY_API_KEY=<key> .venv/bin/pantry-mcp
 
 npx @modelcontextprotocol/inspector   # connect to http://localhost:8000/mcp
 ```
+
+## License
+
+[MIT](LICENSE)

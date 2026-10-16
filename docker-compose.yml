@@ -1,25 +1,14 @@
 services:
   pantry-mcp:
     build: .
+    restart: unless-stopped
     env_file:
       - .env
     volumes:
       - oauth:/data/oauth
-    networks:
-      - heracles
-    labels:
-      - "traefik.enable=true"
-      - "traefik.http.routers.pantry-mcp.rule=Host(`pantry-mcp.globostofo.net`)"
-      - "traefik.http.routers.pantry-mcp.entrypoints=websecure"
-      - "traefik.http.routers.pantry-mcp.tls.certresolver=letsencrypt"
-      - "traefik.http.routers.pantry-mcp.tls.domains[0].main=globostofo.net"
-      - "traefik.http.routers.pantry-mcp.tls.domains[0].sans=*.globostofo.net"
-      - "traefik.http.routers.pantry-mcp.middlewares=secure-headers@file"
-      - "traefik.http.services.pantry-mcp.loadbalancer.server.port=8000"
+    # Put an HTTPS reverse proxy in front of this port, serving BASE_URL
+    ports:
+      - "127.0.0.1:${PORT:-8000}:8000"
 
 volumes:
   oauth:
-
-networks:
-  heracles:
-    external: true

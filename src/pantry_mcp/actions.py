@@ -16,8 +16,8 @@ from pydantic import BaseModel, Field
 
 from pantry_mcp.grocy import Grocy, GrocyError
 from pantry_mcp.lookup import Units, find, load_units, num
+from pantry_mcp.pantry import NEVER_DUE
 
-NEVER_DUE = "2999-12-31"
 # Entities Grocy lets the API create, edit and delete, minus API keys
 WRITABLE_ENTITIES = frozenset({
     "products", "chores", "product_barcodes", "batteries", "locations", "quantity_units",

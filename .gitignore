@@ -4,3 +4,6 @@ __pycache__/
 *.egg-info/
 build/
 .pytest_cache/
+
+# Local deployment overrides (reverse proxy labels, networks)
+docker-compose.override.yml

@@ -14,9 +14,8 @@ RUN useradd --uid 1000 --create-home pantry \
     && chown -R pantry:pantry /data
 USER pantry
 
-# Default meal plan range starts "today": use the same local date as Romain
-ENV TZ=Europe/Paris \
-    FASTMCP_HOME=/data/oauth
+# Set TZ (e.g. Europe/Paris) at runtime: the default meal plan range starts "today"
+ENV FASTMCP_HOME=/data/oauth
 
 EXPOSE 8000
 CMD ["pantry-mcp"]

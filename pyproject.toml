@@ -1,7 +1,9 @@
 [project]
 name = "pantry-mcp"
 version = "0.1.0"
-description = "Remote MCP server exposing Grocy (food stock, recipes, meal plan) to claude.ai"
+description = "Remote MCP server that lets AI agents read and maintain a Grocy instance"
+readme = "README.md"
+license = "MIT"
 requires-python = ">=3.12"
 dependencies = ["fastmcp>=4.0,<5", "httpx"]
 
@@ -12,7 +14,7 @@ dev = ["pytest"]
 pantry-mcp = "pantry_mcp.server:main"
 
 [build-system]
-requires = ["setuptools>=69"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [tool.pytest.ini_options]

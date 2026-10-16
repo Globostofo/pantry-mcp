@@ -1,3 +1,0 @@
-services:
-  pantry-mcp:
-    restart: unless-stopped
